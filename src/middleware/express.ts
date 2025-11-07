@@ -1,5 +1,6 @@
 import { Request, Response, NextFunction } from 'express';
 import { TracekitClient } from '../client';
+import * as api from '@opentelemetry/api';
 
 export function createExpressMiddleware(client: TracekitClient) {
   return async (req: Request, res: Response, next: NextFunction) => {
@@ -8,19 +9,22 @@ export function createExpressMiddleware(client: TracekitClient) {
       return next();
     }
 
-    const startTime = process.hrtime();
+    const startTime = Date.now();
 
     // Get operation name from route
     const operationName = getOperationName(req);
 
     // Start trace
-    const spanId = client.startTrace(operationName, {
+    const span = client.startTrace(operationName, {
       'http.method': req.method,
       'http.url': req.originalUrl || req.url,
       'http.route': (req.route?.path as string) || req.path,
       'http.user_agent': req.get('user-agent') || '',
       'http.client_ip': getClientIp(req),
     });
+
+    // Store span in request for nested spans
+    (req as any).__tracekitSpan = span;
 
     // Capture response
     const originalSend = res.send;
@@ -29,22 +33,16 @@ export function createExpressMiddleware(client: TracekitClient) {
     res.send = function (body: any): Response {
       if (!responseSent) {
         responseSent = true;
-        const [seconds, nanos] = process.hrtime(startTime);
-        const durationMs = seconds * 1000 + nanos / 1_000_000;
+        const durationMs = Date.now() - startTime;
 
         client.endSpan(
-          spanId,
+          span,
           {
             'http.status_code': res.statusCode,
-            'http.duration_ms': Math.round(durationMs),
+            'http.duration_ms': durationMs,
           },
           res.statusCode >= 400 ? 'ERROR' : 'OK'
         );
-
-        // Flush traces asynchronously
-        client.flush().catch((err) => {
-          console.warn('TraceKit: Failed to flush traces', err);
-        });
       }
 
       return originalSend.call(this, body);
@@ -55,13 +53,17 @@ export function createExpressMiddleware(client: TracekitClient) {
       next();
     } catch (error) {
       if (error instanceof Error) {
-        client.recordException(spanId, error);
-        client.endSpan(spanId, {}, 'ERROR');
-        client.flush().catch(() => {});
+        client.recordException(span, error);
+        client.endSpan(span, {}, 'ERROR');
       }
       throw error;
     }
   };
+}
+
+// Helper to get current span from request
+export function getCurrentSpan(req: Request): api.Span | null {
+  return (req as any).__tracekitSpan || null;
 }
 
 function getOperationName(req: Request): string {

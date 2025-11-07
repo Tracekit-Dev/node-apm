@@ -1,4 +1,12 @@
-import axios, { AxiosInstance } from 'axios';
+import { NodeTracerProvider } from '@opentelemetry/sdk-trace-node';
+import { OTLPTraceExporter } from '@opentelemetry/exporter-trace-otlp-http';
+import { Resource } from '@opentelemetry/resources';
+import { SemanticResourceAttributes } from '@opentelemetry/semantic-conventions';
+import {
+  BatchSpanProcessor,
+  SimpleSpanProcessor,
+} from '@opentelemetry/sdk-trace-node';
+import * as api from '@opentelemetry/api';
 
 export interface TracekitConfig {
   apiKey: string;
@@ -8,33 +16,10 @@ export interface TracekitConfig {
   sampleRate?: number;
 }
 
-export interface SpanAttributes {
-  [key: string]: string | number | boolean;
-}
-
-interface Span {
-  traceId: string;
-  spanId: string;
-  parentSpanId: string | null;
-  name: string;
-  kind: string;
-  startTime: bigint;
-  endTime: bigint | null;
-  attributes: SpanAttributes;
-  status: string;
-  events: Array<{
-    name: string;
-    timestamp: bigint;
-    attributes: SpanAttributes;
-  }>;
-}
-
 export class TracekitClient {
-  private httpClient: AxiosInstance;
+  private provider: NodeTracerProvider;
+  private tracer: api.Tracer;
   private config: Required<TracekitConfig>;
-  private currentSpans: Map<string, Span> = new Map();
-  private currentTraceId: string | null = null;
-  private rootSpanId: string | null = null;
 
   constructor(config: TracekitConfig) {
     this.config = {
@@ -45,126 +30,94 @@ export class TracekitClient {
       apiKey: config.apiKey,
     };
 
-    this.httpClient = axios.create({
-      baseURL: this.config.endpoint,
-      timeout: 5000,
-      headers: {
-        'Content-Type': 'application/json',
-        'X-API-Key': this.config.apiKey,
-      },
+    // Create resource with service name
+    const resource = new Resource({
+      [SemanticResourceAttributes.SERVICE_NAME]: this.config.serviceName,
     });
+
+    // Initialize tracer provider
+    this.provider = new NodeTracerProvider({
+      resource,
+    });
+
+    if (this.config.enabled) {
+      // Configure OTLP exporter
+      const exporter = new OTLPTraceExporter({
+        url: this.config.endpoint,
+        headers: {
+          'X-API-Key': this.config.apiKey,
+        },
+      });
+
+      // Use batch processor for better performance
+      this.provider.addSpanProcessor(new BatchSpanProcessor(exporter));
+
+      // Register the provider
+      this.provider.register();
+    }
+
+    this.tracer = api.trace.getTracer('@tracekit/node-apm', '1.0.0');
   }
 
-  startTrace(operationName: string, attributes: SpanAttributes = {}): string {
-    this.currentTraceId = this.generateId(16);
-    this.rootSpanId = this.generateId(8);
-
-    const span: Span = {
-      traceId: this.currentTraceId,
-      spanId: this.rootSpanId,
-      parentSpanId: null,
-      name: operationName,
-      kind: 'SERVER',
-      startTime: this.currentTimeNanos(),
-      endTime: null,
-      attributes: {
-        ...attributes,
-        'service.name': this.config.serviceName,
-      },
-      status: 'UNSET',
-      events: [],
-    };
-
-    this.currentSpans.set(this.rootSpanId, span);
-    return this.rootSpanId;
+  startTrace(operationName: string, attributes: Record<string, any> = {}): api.Span {
+    return this.tracer.startSpan(operationName, {
+      kind: api.SpanKind.SERVER,
+      attributes: this.normalizeAttributes(attributes),
+    });
   }
 
   startSpan(
     operationName: string,
-    parentSpanId: string | null = null,
-    attributes: SpanAttributes = {}
-  ): string {
-    if (!this.currentTraceId) {
-      return this.startTrace(operationName, attributes);
-    }
-
-    const spanId = this.generateId(8);
-    const parent = parentSpanId || this.rootSpanId;
-
-    const span: Span = {
-      traceId: this.currentTraceId,
-      spanId,
-      parentSpanId: parent,
-      name: operationName,
-      kind: 'INTERNAL',
-      startTime: this.currentTimeNanos(),
-      endTime: null,
-      attributes: {
-        ...attributes,
-        'service.name': this.config.serviceName,
-      },
-      status: 'UNSET',
-      events: [],
+    parentSpan?: api.Span | null,
+    attributes: Record<string, any> = {}
+  ): api.Span {
+    const options: api.SpanOptions = {
+      kind: api.SpanKind.INTERNAL,
+      attributes: this.normalizeAttributes(attributes),
     };
 
-    this.currentSpans.set(spanId, span);
-    return spanId;
+    if (parentSpan) {
+      const ctx = api.trace.setSpan(api.context.active(), parentSpan);
+      return this.tracer.startSpan(operationName, options, ctx);
+    }
+
+    return this.tracer.startSpan(operationName, options);
   }
 
-  endSpan(
-    spanId: string,
-    finalAttributes: SpanAttributes = {},
-    status: string = 'OK'
-  ): void {
-    const span = this.currentSpans.get(spanId);
-    if (!span) return;
+  endSpan(span: api.Span, finalAttributes: Record<string, any> = {}, status?: string): void {
+    // Add final attributes
+    if (Object.keys(finalAttributes).length > 0) {
+      span.setAttributes(this.normalizeAttributes(finalAttributes));
+    }
 
-    span.endTime = this.currentTimeNanos();
-    span.status = status;
-    span.attributes = { ...span.attributes, ...finalAttributes };
+    // Set status
+    if (status === 'ERROR') {
+      span.setStatus({ code: api.SpanStatusCode.ERROR });
+    } else if (status === 'OK') {
+      span.setStatus({ code: api.SpanStatusCode.OK });
+    }
+
+    span.end();
   }
 
-  addEvent(spanId: string, name: string, attributes: SpanAttributes = {}): void {
-    const span = this.currentSpans.get(spanId);
-    if (!span) return;
-
-    span.events.push({
-      name,
-      timestamp: this.currentTimeNanos(),
-      attributes,
-    });
+  addEvent(span: api.Span, name: string, attributes: Record<string, any> = {}): void {
+    span.addEvent(name, this.normalizeAttributes(attributes));
   }
 
-  recordException(spanId: string, error: Error): void {
-    const span = this.currentSpans.get(spanId);
-    if (!span) return;
-
-    span.status = 'ERROR';
-    span.events.push({
-      name: 'exception',
-      timestamp: this.currentTimeNanos(),
-      attributes: {
-        'exception.type': error.name,
-        'exception.message': error.message,
-        'exception.stacktrace': error.stack || '',
-      },
+  recordException(span: api.Span, error: Error): void {
+    span.recordException(error);
+    span.setStatus({
+      code: api.SpanStatusCode.ERROR,
+      message: error.message,
     });
   }
 
   async flush(): Promise<void> {
-    if (this.currentSpans.size === 0) return;
+    await this.provider.forceFlush();
+  }
 
-    try {
-      const payload = this.buildOTLPPayload();
-
-      await this.httpClient.post('', payload);
-    } catch (error) {
-      console.warn('TraceKit: Failed to send traces', error);
-    } finally {
-      this.currentSpans.clear();
-      this.currentTraceId = null;
-      this.rootSpanId = null;
-    }
+  async shutdown(): Promise<void> {
+    await this.provider.shutdown();
   }
 
   isEnabled(): boolean {
@@ -175,87 +128,25 @@ export class TracekitClient {
     return Math.random() < this.config.sampleRate;
   }
 
-  getCurrentTraceId(): string | null {
-    return this.currentTraceId;
+  getTracer(): api.Tracer {
+    return this.tracer;
   }
 
-  getRootSpanId(): string | null {
-    return this.rootSpanId;
-  }
-
-  private buildOTLPPayload(): any {
-    const spans = Array.from(this.currentSpans.values()).map((span) => ({
-      traceId: span.traceId,
-      spanId: span.spanId,
-      parentSpanId: span.parentSpanId,
-      name: span.name,
-      kind: span.kind,
-      startTimeUnixNano: span.startTime.toString(),
-      endTimeUnixNano: (span.endTime || this.currentTimeNanos()).toString(),
-      attributes: this.formatAttributes(span.attributes),
-      status: {
-        code: span.status === 'OK' ? 1 : span.status === 'ERROR' ? 2 : 0,
-      },
-      events: span.events.map((event) => ({
-        name: event.name,
-        timeUnixNano: event.timestamp.toString(),
-        attributes: this.formatAttributes(event.attributes),
-      })),
-    }));
-
-    return {
-      resourceSpans: [
-        {
-          resource: {
-            attributes: this.formatAttributes({
-              'service.name': this.config.serviceName,
-            }),
-          },
-          scopeSpans: [
-            {
-              scope: {
-                name: '@tracekit/node-apm',
-                version: '1.0.0',
-              },
-              spans,
-            },
-          ],
-        },
-      ],
-    };
-  }
-
-  private formatAttributes(attributes: SpanAttributes): any[] {
-    return Object.entries(attributes).map(([key, value]) => ({
-      key,
-      value: this.formatValue(value),
-    }));
-  }
-
-  private formatValue(value: string | number | boolean): any {
-    if (typeof value === 'string') {
-      return { stringValue: value };
-    } else if (typeof value === 'number') {
-      return Number.isInteger(value)
-        ? { intValue: value }
-        : { doubleValue: value };
-    } else if (typeof value === 'boolean') {
-      return { boolValue: value };
+  private normalizeAttributes(attributes: Record<string, any>): Record<string, api.AttributeValue> {
+    const normalized: Record<string, api.AttributeValue> = {};
+    for (const [key, value] of Object.entries(attributes)) {
+      if (
+        typeof value === 'string' ||
+        typeof value === 'number' ||
+        typeof value === 'boolean'
+      ) {
+        normalized[key] = value;
+      } else if (Array.isArray(value)) {
+        normalized[key] = value.map(String);
+      } else {
+        normalized[key] = String(value);
+      }
     }
-    return { stringValue: String(value) };
-  }
-
-  private generateId(bytes: number): string {
-    const hex = '0123456789abcdef';
-    let result = '';
-    for (let i = 0; i < bytes * 2; i++) {
-      result += hex[Math.floor(Math.random() * 16)];
-    }
-    return result;
-  }
-
-  private currentTimeNanos(): bigint {
-    const [seconds, nanos] = process.hrtime();
-    return BigInt(seconds) * BigInt(1_000_000_000) + BigInt(nanos);
+    return normalized;
   }
 }
