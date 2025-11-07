@@ -38,7 +38,7 @@ export class TracekitClient {
 
   constructor(config: TracekitConfig) {
     this.config = {
-      endpoint: config.endpoint || 'https://tracekit.dev/v1/traces',
+      endpoint: config.endpoint || 'https://app.tracekit.dev/v1/traces',
       serviceName: config.serviceName || 'node-app',
       enabled: config.enabled ?? true,
       sampleRate: config.sampleRate ?? 1.0,

@@ -95,7 +95,7 @@ export class AppModule {}
 
 That's it! Your app is now automatically traced.
 
-Get your API key at [https://tracekit.dev](https://tracekit.dev)
+Get your API key at [https://app.tracekit.dev](https://app.tracekit.dev)
 
 ## Configuration
 
@@ -111,8 +111,8 @@ tracekit.init({
   // Optional: Service name (default: 'node-app')
   serviceName: 'my-service',
 
-  // Optional: TraceKit endpoint (default: 'https://tracekit.dev/v1/traces')
-  endpoint: 'https://tracekit.dev/v1/traces',
+  // Optional: TraceKit endpoint (default: 'https://app.tracekit.dev/v1/traces')
+  endpoint: 'https://app.tracekit.dev/v1/traces',
 
   // Optional: Enable/disable tracing (default: true)
   enabled: process.env.NODE_ENV !== 'development',
@@ -356,8 +356,8 @@ export class UsersController {
 
 ## Support
 
-- Documentation: [https://docs.tracekit.dev](https://docs.tracekit.dev)
-- Issues: [https://github.com/tracekit/node-apm/issues](https://github.com/tracekit/node-apm/issues)
+- Documentation: [https://app.tracekit.dev/docs](https://app.tracekit.dev/docs)
+- Issues: [https://github.com/Tracekit-Dev/node-apm/issues](https://github.com/Tracekit-Dev/node-apm/issues)
 - Email: support@tracekit.dev
 
 ## License

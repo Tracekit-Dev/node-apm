@@ -30,10 +30,10 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "https://github.com/tracekit/node-apm.git"
+    "url": "https://github.com/Tracekit-Dev/node-apm.git"
   },
   "bugs": {
-    "url": "https://github.com/tracekit/node-apm/issues"
+    "url": "https://github.com/Tracekit-Dev/node-apm/issues"
   },
   "homepage": "https://tracekit.dev",
   "dependencies": {
