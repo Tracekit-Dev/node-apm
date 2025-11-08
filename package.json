@@ -1,6 +1,6 @@
 {
   "name": "@tracekit/node-apm",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "TraceKit APM for Node.js - Zero-config distributed tracing for Express and NestJS",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
@@ -30,7 +30,7 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "https://github.com/Tracekit-Dev/node-apm.git"
+    "url": "git+https://github.com/Tracekit-Dev/node-apm.git"
   },
   "bugs": {
     "url": "https://github.com/Tracekit-Dev/node-apm/issues"
