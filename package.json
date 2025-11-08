@@ -1,6 +1,6 @@
 {
   "name": "@tracekit/node-apm",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "description": "TraceKit APM for Node.js - Zero-config distributed tracing for Express and NestJS",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
