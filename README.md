@@ -177,7 +177,7 @@ import { getClient } from '@tracekit/node-apm';
 app.get('/custom', async (req, res) => {
   const client = getClient();
 
-  const spanId = client.startSpan('my-operation', null, {
+  const span = client.startSpan('my-operation', null, {
     'user.id': req.user?.id,
     'custom.attribute': 'value',
   });
@@ -185,14 +185,14 @@ app.get('/custom', async (req, res) => {
   try {
     const result = await doSomething();
 
-    client.endSpan(spanId, {
+    client.endSpan(span, {
       'result.count': result.length,
     });
 
     res.json(result);
   } catch (error) {
-    client.recordException(spanId, error as Error);
-    client.endSpan(spanId, {}, 'ERROR');
+    client.recordException(span, error as Error);
+    client.endSpan(span, {}, 'ERROR');
     throw error;
   }
 });
@@ -211,21 +211,21 @@ export class MyService {
   ) {}
 
   async doSomething() {
-    const spanId = this.tracekit.startSpan('custom-operation', null, {
+    const span = this.tracekit.startSpan('custom-operation', null, {
       'operation.type': 'database',
     });
 
     try {
       const result = await this.database.query();
 
-      this.tracekit.endSpan(spanId, {
+      this.tracekit.endSpan(span, {
         'rows.count': result.length,
       });
 
       return result;
     } catch (error) {
-      this.tracekit.recordException(spanId, error as Error);
-      this.tracekit.endSpan(spanId, {}, 'ERROR');
+      this.tracekit.recordException(span, error as Error);
+      this.tracekit.endSpan(span, {}, 'ERROR');
       throw error;
     }
   }
@@ -266,17 +266,21 @@ TraceKit APM is designed to have minimal performance impact:
 Full TypeScript support with type definitions included:
 
 ```typescript
-import { TracekitClient, TracekitConfig, SpanAttributes } from '@tracekit/node-apm';
+import { TracekitClient, TracekitConfig, Span } from '@tracekit/node-apm';
 
 const config: TracekitConfig = {
   apiKey: 'your-key',
   serviceName: 'my-app',
 };
 
-const attributes: SpanAttributes = {
+const attributes: Record<string, any> = {
   'user.id': 123,
   'request.path': '/api/users',
 };
+
+// Using the client
+const client = new TracekitClient(config);
+const span: Span = client.startSpan('my-operation', null, attributes);
 ```
 
 ## Requirements
