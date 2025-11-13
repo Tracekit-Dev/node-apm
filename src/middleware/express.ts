@@ -1,8 +1,13 @@
+import { AsyncLocalStorage } from 'async_hooks';
 import { Request, Response, NextFunction } from 'express';
 import { TracekitClient } from '../client';
+import { SnapshotClient } from '../snapshot-client';
 import * as api from '@opentelemetry/api';
 
-export function createExpressMiddleware(client: TracekitClient) {
+// AsyncLocalStorage for request context
+const requestContextStorage = new AsyncLocalStorage<Record<string, any>>();
+
+export function createExpressMiddleware(client: TracekitClient, snapshotClient?: SnapshotClient) {
   return async (req: Request, res: Response, next: NextFunction) => {
     // Check if tracing is enabled
     if (!client.isEnabled() || !client.shouldSample()) {
@@ -26,44 +31,63 @@ export function createExpressMiddleware(client: TracekitClient) {
     // Store span in request for nested spans
     (req as any).__tracekitSpan = span;
 
-    // Capture response
-    const originalSend = res.send;
-    let responseSent = false;
-
-    res.send = function (body: any): Response {
-      if (!responseSent) {
-        responseSent = true;
-        const durationMs = Date.now() - startTime;
-
-        client.endSpan(
-          span,
-          {
-            'http.status_code': res.statusCode,
-            'http.duration_ms': durationMs,
-          },
-          res.statusCode >= 400 ? 'ERROR' : 'OK'
-        );
-      }
-
-      return originalSend.call(this, body);
+    // Extract request context for snapshots
+    const requestContext = {
+      method: req.method,
+      path: req.path,
+      url: req.originalUrl,
+      ip: getClientIp(req),
+      user_agent: req.get('user-agent') || '',
+      query: req.query,
+      headers: filterHeaders(req.headers),
     };
 
-    // Handle errors
-    try {
-      next();
-    } catch (error) {
-      if (error instanceof Error) {
-        client.recordException(span, error);
-        client.endSpan(span, {}, 'ERROR');
+    // Store in AsyncLocalStorage for snapshot access
+    requestContextStorage.run(requestContext, () => {
+      // Capture response
+      const originalSend = res.send;
+      let responseSent = false;
+
+      res.send = function (body: any): Response {
+        if (!responseSent) {
+          responseSent = true;
+          const durationMs = Date.now() - startTime;
+
+          client.endSpan(
+            span,
+            {
+              'http.status_code': res.statusCode,
+              'http.duration_ms': durationMs,
+            },
+            res.statusCode >= 400 ? 'ERROR' : 'OK'
+          );
+        }
+
+        return originalSend.call(this, body);
+      };
+
+      // Handle errors
+      try {
+        next();
+      } catch (error) {
+        if (error instanceof Error) {
+          client.recordException(span, error);
+          client.endSpan(span, {}, 'ERROR');
+        }
+        throw error;
       }
-      throw error;
-    }
+    });
   };
 }
 
 // Helper to get current span from request
 export function getCurrentSpan(req: Request): api.Span | null {
   return (req as any).__tracekitSpan || null;
+}
+
+// Helper to get request context from any code
+export function getRequestContext(): Record<string, any> | undefined {
+  return requestContextStorage.getStore();
 }
 
 function getOperationName(req: Request): string {
@@ -83,4 +107,17 @@ function getClientIp(req: Request): string {
     req.socket.remoteAddress ||
     ''
   );
+}
+
+function filterHeaders(headers: any): Record<string, string> {
+  const filtered: Record<string, string> = {};
+  const allowlist = ['content-type', 'content-length', 'host', 'user-agent', 'referer'];
+
+  for (const key of allowlist) {
+    if (headers[key]) {
+      filtered[key] = headers[key];
+    }
+  }
+
+  return filtered;
 }

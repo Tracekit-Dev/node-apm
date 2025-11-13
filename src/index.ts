@@ -1,5 +1,6 @@
 import { TracekitClient, TracekitConfig } from './client';
 import { createExpressMiddleware } from './middleware/express';
+import { SnapshotClient } from './snapshot-client';
 
 let globalClient: TracekitClient | null = null;
 
@@ -20,7 +21,7 @@ export function middleware() {
       'TraceKit not initialized. Call tracekit.init() first.'
     );
   }
-  return createExpressMiddleware(globalClient);
+  return createExpressMiddleware(globalClient, globalClient.getSnapshotClient());
 }
 
 /**
@@ -37,6 +38,7 @@ export function getClient(): TracekitClient {
 
 // Export types
 export { TracekitClient, TracekitConfig } from './client';
+export { SnapshotClient } from './snapshot-client';
 export { createExpressMiddleware, getCurrentSpan } from './middleware/express';
 
 // Re-export OpenTelemetry types for convenience

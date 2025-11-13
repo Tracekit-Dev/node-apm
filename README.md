@@ -15,6 +15,7 @@ Zero-config distributed tracing and performance monitoring for Express and NestJ
 - **TypeScript First** - Full type definitions included
 - **HTTP Request Tracing** - Track every request, route, and handler
 - **Error Tracking** - Capture exceptions with full context
+- **Code Monitoring** - Live debugging with breakpoints and variable inspection
 - **Low Overhead** - < 5% performance impact
 
 ## Installation
@@ -95,6 +96,94 @@ export class AppModule {}
 
 That's it! Your app is now automatically traced.
 
+## Code Monitoring (Live Debugging)
+
+TraceKit includes production-safe code monitoring for live debugging without redeployment.
+
+### Enable Code Monitoring
+
+```typescript
+import * as tracekit from '@tracekit/node-apm';
+
+// Enable code monitoring
+const client = tracekit.init({
+  apiKey: process.env.TRACEKIT_API_KEY!,
+  serviceName: 'my-app',
+  enableCodeMonitoring: true,  // Enable live debugging
+});
+```
+
+### Add Debug Points
+
+Add checkpoints anywhere in your code to capture variable state and stack traces:
+
+```typescript
+// In any service or controller
+app.post('/checkout', async (req, res) => {
+  const cart = req.body.cart;
+  const userId = req.body.userId;
+
+  // Capture snapshot at this point
+  await client.captureSnapshot('checkout-validation', {
+    userId,
+    cartItems: cart.items.length,
+    totalAmount: cart.total,
+  });
+
+  // Process payment...
+  const result = await processPayment(cart);
+
+  // Another checkpoint
+  await client.captureSnapshot('payment-complete', {
+    userId,
+    paymentId: result.paymentId,
+    success: result.success,
+  });
+
+  res.json(result);
+});
+```
+
+### Automatic Breakpoint Management
+
+- **Auto-Registration**: First call to `captureSnapshot()` automatically creates breakpoints in TraceKit
+- **Smart Matching**: Breakpoints match by function name + label (stable across code changes)
+- **Background Sync**: SDK polls for active breakpoints every 30 seconds
+- **Production Safe**: No performance impact when breakpoints are inactive
+
+### View Captured Data
+
+Snapshots include:
+- **Variables**: Local variables at capture point
+- **Stack Trace**: Full call stack with file/line numbers
+- **Request Context**: HTTP method, URL, headers, query params
+- **Execution Time**: When the snapshot was captured
+
+### NestJS Usage
+
+```typescript
+import { Injectable, Inject } from '@nestjs/common';
+import { SnapshotClient } from '@tracekit/node-apm';
+
+@Injectable()
+export class PaymentService {
+  constructor(
+    @Inject('TRACEKIT_SNAPSHOT_CLIENT')
+    private snapshotClient?: SnapshotClient
+  ) {}
+
+  async processPayment(order: Order) {
+    // Automatic snapshot capture
+    await this.snapshotClient?.checkAndCaptureWithContext('payment-processing', {
+      orderId: order.id,
+      amount: order.amount,
+    });
+
+    // ... payment logic
+  }
+}
+```
+
 Get your API key at [https://app.tracekit.dev](https://app.tracekit.dev)
 
 ## Configuration
@@ -119,6 +208,9 @@ tracekit.init({
 
   // Optional: Sample rate 0.0-1.0 (default: 1.0 = 100%)
   sampleRate: 0.5, // Trace 50% of requests
+
+  // Optional: Enable live code debugging (default: false)
+  enableCodeMonitoring: true, // Enable breakpoints and snapshots
 });
 ```
 
@@ -138,6 +230,7 @@ import { TracekitModule } from '@tracekit/node-apm/nestjs';
         apiKey: config.get('TRACEKIT_API_KEY')!,
         serviceName: config.get('APP_NAME', 'my-app'),
         enabled: config.get('NODE_ENV') !== 'development',
+        enableCodeMonitoring: config.get('TRACEKIT_CODE_MONITORING_ENABLED', false),
       }),
     }),
   ],

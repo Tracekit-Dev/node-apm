@@ -7,6 +7,7 @@ import {
   SimpleSpanProcessor,
 } from '@opentelemetry/sdk-trace-node';
 import * as api from '@opentelemetry/api';
+import { SnapshotClient } from './snapshot-client';
 
 export interface TracekitConfig {
   apiKey: string;
@@ -14,12 +15,14 @@ export interface TracekitConfig {
   serviceName?: string;
   enabled?: boolean;
   sampleRate?: number;
+  enableCodeMonitoring?: boolean;
 }
 
 export class TracekitClient {
   private provider: NodeTracerProvider;
   private tracer: api.Tracer;
   private config: Required<TracekitConfig>;
+  private snapshotClient?: SnapshotClient;
 
   constructor(config: TracekitConfig) {
     this.config = {
@@ -27,6 +30,7 @@ export class TracekitClient {
       serviceName: config.serviceName || 'node-app',
       enabled: config.enabled ?? true,
       sampleRate: config.sampleRate ?? 1.0,
+      enableCodeMonitoring: config.enableCodeMonitoring ?? false,
       apiKey: config.apiKey,
     };
 
@@ -57,6 +61,16 @@ export class TracekitClient {
     }
 
     this.tracer = api.trace.getTracer('@tracekit/node-apm', '1.0.0');
+
+    // Initialize snapshot client if enabled
+    if (this.config.enableCodeMonitoring) {
+      this.snapshotClient = new SnapshotClient(
+        this.config.apiKey,
+        this.config.endpoint.replace('/v1/traces', ''),
+        this.config.serviceName
+      );
+      this.snapshotClient.start();
+    }
   }
 
   startTrace(operationName: string, attributes: Record<string, any> = {}): api.Span {
@@ -105,11 +119,59 @@ export class TracekitClient {
   }
 
   recordException(span: api.Span, error: Error): void {
+    // Format stack trace for code discovery BEFORE recording exception
+    let formattedStackTrace = '';
+    if (error.stack) {
+      formattedStackTrace = this.formatStackTrace(error.stack);
+    }
+    
+    // Record exception as an event with formatted stack trace
+    span.addEvent('exception', {
+      'exception.type': error.constructor.name,
+      'exception.message': error.message,
+      'exception.stacktrace': formattedStackTrace, // For code discovery
+    });
+    
+    // Also use standard OpenTelemetry exception recording
     span.recordException(error);
+    
     span.setStatus({
       code: api.SpanStatusCode.ERROR,
       message: error.message,
     });
+  }
+
+  // Format stack trace for code discovery
+  private formatStackTrace(stack: string): string {
+    const lines = stack.split('\n');
+    const formatted: string[] = [];
+
+    for (let i = 0; i < lines.length; i++) {
+      const line = lines[i].trim();
+      
+      // Skip the error message line (first line)
+      if (i === 0 && !line.startsWith('at ')) {
+        continue;
+      }
+
+      // Parse Node.js stack trace format: "at FunctionName (file:line:col)" or "at file:line:col"
+      const match = line.match(/at\s+(?:([^\s]+)\s+\()?([^:]+):(\d+):\d+\)?/);
+      
+      if (match) {
+        const functionName = match[1] || '';
+        const file = match[2];
+        const lineNumber = match[3];
+        
+        // Format as "function at file:line" (consistent with PHP/Laravel)
+        if (functionName && functionName !== 'anonymous') {
+          formatted.push(`${functionName} at ${file}:${lineNumber}`);
+        } else {
+          formatted.push(`${file}:${lineNumber}`);
+        }
+      }
+    }
+
+    return formatted.join('\n');
   }
 
   async flush(): Promise<void> {
@@ -117,6 +179,12 @@ export class TracekitClient {
   }
 
   async shutdown(): Promise<void> {
+    // Stop snapshot client first
+    if (this.snapshotClient) {
+      this.snapshotClient.stop();
+    }
+
+    // Shutdown tracing provider
     await this.provider.shutdown();
   }
 
@@ -130,6 +198,18 @@ export class TracekitClient {
 
   getTracer(): api.Tracer {
     return this.tracer;
+  }
+
+  // Expose snapshot client
+  getSnapshotClient(): SnapshotClient | undefined {
+    return this.snapshotClient;
+  }
+
+  // Convenience method for capturing snapshots
+  async captureSnapshot(label: string, variables: Record<string, any> = {}): Promise<void> {
+    if (this.snapshotClient) {
+      await this.snapshotClient.checkAndCaptureWithContext(label, variables);
+    }
   }
 
   private normalizeAttributes(attributes: Record<string, any>): Record<string, api.AttributeValue> {
