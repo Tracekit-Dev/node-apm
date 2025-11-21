@@ -3,9 +3,13 @@ import { Request, Response, NextFunction } from 'express';
 import { TracekitClient } from '../client';
 import { SnapshotClient } from '../snapshot-client';
 import * as api from '@opentelemetry/api';
+import { W3CTraceContextPropagator } from '@opentelemetry/core';
 
 // AsyncLocalStorage for request context
 const requestContextStorage = new AsyncLocalStorage<Record<string, any>>();
+
+// W3C Trace Context propagator for extracting traceparent header
+const propagator = new W3CTraceContextPropagator();
 
 export function createExpressMiddleware(client: TracekitClient, snapshotClient?: SnapshotClient) {
   return async (req: Request, res: Response, next: NextFunction) => {
@@ -19,13 +23,31 @@ export function createExpressMiddleware(client: TracekitClient, snapshotClient?:
     // Get operation name from route
     const operationName = getOperationName(req);
 
-    // Start trace
-    const span = client.startTrace(operationName, {
-      'http.method': req.method,
-      'http.url': req.originalUrl || req.url,
-      'http.route': (req.route?.path as string) || req.path,
-      'http.user_agent': req.get('user-agent') || '',
-      'http.client_ip': getClientIp(req),
+    // Extract trace context from incoming request headers (W3C Trace Context)
+    // This enables distributed tracing - the span will be linked to the parent trace
+    const parentContext = propagator.extract(
+      api.context.active(),
+      req.headers,
+      {
+        get(carrier: any, key: string): string | undefined {
+          return carrier[key.toLowerCase()];
+        },
+        keys(carrier: any): string[] {
+          return Object.keys(carrier);
+        },
+      }
+    );
+
+    // Start trace within the parent context (if any)
+    // This ensures the new span is a child of the incoming trace
+    const span = api.context.with(parentContext, () => {
+      return client.startServerSpan(operationName, {
+        'http.method': req.method,
+        'http.url': req.originalUrl || req.url,
+        'http.route': (req.route?.path as string) || req.path,
+        'http.user_agent': req.get('user-agent') || '',
+        'http.client_ip': getClientIp(req),
+      });
     });
 
     // Store span in request for nested spans

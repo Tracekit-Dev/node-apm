@@ -211,6 +211,12 @@ tracekit.init({
 
   // Optional: Enable live code debugging (default: false)
   enableCodeMonitoring: true, // Enable breakpoints and snapshots
+
+  // Optional: Map hostnames to service names for service graph
+  serviceNameMappings: {
+    'localhost:8082': 'payment-service',
+    'localhost:8083': 'user-service',
+  },
 });
 ```
 
@@ -238,11 +244,109 @@ import { TracekitModule } from '@tracekit/node-apm/nestjs';
 export class AppModule {}
 ```
 
+## Automatic Service Discovery
+
+TraceKit automatically instruments **outgoing HTTP calls** to create service dependency graphs. This enables you to see which services talk to each other in your distributed system.
+
+### How It Works
+
+When your service makes an HTTP request to another service:
+
+1. ✅ TraceKit creates a **CLIENT span** for the outgoing request
+2. ✅ Trace context is automatically injected into request headers (`traceparent`)
+3. ✅ The receiving service creates a **SERVER span** linked to your CLIENT span
+4. ✅ TraceKit maps the dependency: **YourService → TargetService**
+
+### Supported HTTP Clients
+
+TraceKit automatically instruments these HTTP libraries:
+
+- ✅ **`http`** / **`https`** (Node.js built-in modules)
+- ✅ **`fetch`** (Node 18+ native fetch API)
+- ✅ **`axios`** (works via http module)
+- ✅ **`node-fetch`** (works via http module)
+- ✅ **`got`**, **`superagent`**, etc. (work via http module)
+
+**Zero configuration required!** Just make HTTP calls as normal:
+
+```typescript
+import axios from 'axios';
+import fetch from 'node-fetch';
+
+// All of these automatically create CLIENT spans:
+await fetch('http://payment-service/charge');
+await axios.get('http://inventory-service/check');
+http.get('http://user-service/profile/123', callback);
+```
+
+### Service Name Detection
+
+TraceKit intelligently extracts service names from URLs:
+
+| URL | Extracted Service Name |
+|-----|------------------------|
+| `http://payment-service:3000` | `payment-service` |
+| `http://payment.internal` | `payment` |
+| `http://payment.svc.cluster.local` | `payment` |
+| `https://api.example.com` | `api.example.com` |
+
+This works seamlessly with:
+- Kubernetes service names
+- Internal DNS names
+- Docker Compose service names
+- External APIs
+
+### Custom Service Name Mappings
+
+For local development or when service names can't be inferred from hostnames, use `serviceNameMappings`:
+
+```typescript
+tracekit.init({
+  apiKey: process.env.TRACEKIT_API_KEY,
+  serviceName: 'my-service',
+  // Map localhost URLs to actual service names
+  serviceNameMappings: {
+    'localhost:8082': 'payment-service',
+    'localhost:8083': 'user-service',
+    'localhost:8084': 'inventory-service',
+    'localhost:5001': 'analytics-service',
+  },
+});
+
+// Now requests to localhost:8082 will show as "payment-service" in the service graph
+const response = await fetch('http://localhost:8082/charge');
+// -> Creates CLIENT span with peer.service = "payment-service"
+```
+
+This is especially useful when:
+- Running microservices locally on different ports
+- Using Docker Compose with localhost networking
+- Testing distributed tracing in development
+
+### Viewing Service Dependencies
+
+Visit your TraceKit dashboard to see:
+
+- **Service Map**: Visual graph showing which services call which
+- **Service List**: Table of all services with health metrics
+- **Service Detail**: Deep dive on individual services with upstream/downstream dependencies
+
+### Disabling Auto-Instrumentation
+
+If you need to disable automatic HTTP client instrumentation:
+
+```typescript
+tracekit.init({
+  apiKey: process.env.TRACEKIT_API_KEY,
+  autoInstrumentHttpClient: false, // Disable auto-instrumentation
+});
+```
+
 ## What Gets Traced?
 
-### HTTP Requests
+### Incoming HTTP Requests (SERVER spans)
 
-Every HTTP request is automatically traced with:
+Every HTTP request to your service is automatically traced with:
 
 - Route path and HTTP method
 - Request URL and query parameters
@@ -250,6 +354,15 @@ Every HTTP request is automatically traced with:
 - Request duration
 - User agent and client IP
 - Controller and handler names (NestJS)
+
+### Outgoing HTTP Requests (CLIENT spans)
+
+Every HTTP request from your service is automatically traced with:
+
+- Target URL and HTTP method
+- HTTP status code
+- Request duration
+- `peer.service` attribute for service dependency mapping
 
 ### Errors and Exceptions
 

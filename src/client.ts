@@ -7,6 +7,9 @@ import {
   SimpleSpanProcessor,
 } from '@opentelemetry/sdk-trace-node';
 import * as api from '@opentelemetry/api';
+import { registerInstrumentations } from '@opentelemetry/instrumentation';
+import { HttpInstrumentation } from '@opentelemetry/instrumentation-http';
+import { FetchInstrumentation } from '@opentelemetry/instrumentation-fetch';
 import { SnapshotClient } from './snapshot-client';
 
 export interface TracekitConfig {
@@ -16,6 +19,13 @@ export interface TracekitConfig {
   enabled?: boolean;
   sampleRate?: number;
   enableCodeMonitoring?: boolean;
+  autoInstrumentHttpClient?: boolean;
+  /**
+   * Map hostnames to service names for peer.service attribute
+   * Useful for mapping localhost URLs to actual service names
+   * Example: { 'localhost:8082': 'go-test-app', 'localhost:8084': 'node-test-app' }
+   */
+  serviceNameMappings?: Record<string, string>;
 }
 
 export class TracekitClient {
@@ -31,7 +41,9 @@ export class TracekitClient {
       enabled: config.enabled ?? true,
       sampleRate: config.sampleRate ?? 1.0,
       enableCodeMonitoring: config.enableCodeMonitoring ?? false,
+      autoInstrumentHttpClient: config.autoInstrumentHttpClient ?? true,
       apiKey: config.apiKey,
+      serviceNameMappings: config.serviceNameMappings ?? {},
     };
 
     // Create resource with service name
@@ -58,6 +70,33 @@ export class TracekitClient {
 
       // Register the provider
       this.provider.register();
+
+      // Auto-instrument HTTP clients for CLIENT span creation
+      if (this.config.autoInstrumentHttpClient) {
+        registerInstrumentations({
+          tracerProvider: this.provider,
+          instrumentations: [
+            // Auto-instrument http/https modules
+            new HttpInstrumentation({
+              requireParentforOutgoingSpans: true,
+              requireParentforIncomingSpans: false,
+              requestHook: (span, request) => {
+                // Extract service name from URL and set peer.service for outgoing requests
+                // ClientRequest has hostname/host properties
+                if ('hostname' in request || 'host' in request) {
+                  const hostname = (request as any).hostname || (request as any).host;
+                  if (hostname) {
+                    const serviceName = this.extractServiceName(hostname);
+                    span.setAttribute('peer.service', serviceName);
+                  }
+                }
+              },
+            }),
+            // Auto-instrument fetch API (Node 18+)
+            new FetchInstrumentation({}),
+          ],
+        });
+      }
     }
 
     this.tracer = api.trace.getTracer('@tracekit/node-apm', '1.0.0');
@@ -78,6 +117,21 @@ export class TracekitClient {
       kind: api.SpanKind.SERVER,
       attributes: this.normalizeAttributes(attributes),
     });
+  }
+
+  /**
+   * Start a SERVER span, properly inheriting from the active context
+   * This is used by middleware to create spans that are children of incoming trace context
+   */
+  startServerSpan(operationName: string, attributes: Record<string, any> = {}): api.Span {
+    return this.tracer.startSpan(
+      operationName,
+      {
+        kind: api.SpanKind.SERVER,
+        attributes: this.normalizeAttributes(attributes),
+      },
+      api.context.active() // Use active context which includes parent from traceparent
+    );
   }
 
   startSpan(
@@ -210,6 +264,39 @@ export class TracekitClient {
     if (this.snapshotClient) {
       await this.snapshotClient.checkAndCaptureWithContext(label, variables);
     }
+  }
+
+  private extractServiceName(hostname: string): string {
+    // First, check if there's a configured mapping for this hostname
+    // This allows mapping localhost:port to actual service names
+    if (this.config.serviceNameMappings[hostname]) {
+      return this.config.serviceNameMappings[hostname];
+    }
+
+    // Also check without port
+    const hostWithoutPort = hostname.split(':')[0];
+    if (this.config.serviceNameMappings[hostWithoutPort]) {
+      return this.config.serviceNameMappings[hostWithoutPort];
+    }
+
+    // Extract service name from hostname for service-to-service mapping
+    // Examples:
+    //   "payment-service" -> "payment-service"
+    //   "payment.internal.svc.cluster.local" -> "payment"
+    //   "api.example.com" -> "api.example.com"
+
+    if (hostname.includes('.svc.cluster.local')) {
+      // Kubernetes service: payment.internal.svc.cluster.local -> payment
+      return hostname.split('.')[0];
+    }
+
+    if (hostname.includes('.internal')) {
+      // Internal service: payment.internal -> payment
+      return hostname.split('.')[0];
+    }
+
+    // Default: use full hostname (strip port if present)
+    return hostWithoutPort;
   }
 
   private normalizeAttributes(attributes: Record<string, any>): Record<string, api.AttributeValue> {
