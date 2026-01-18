@@ -5,12 +5,247 @@ import { SemanticResourceAttributes } from '@opentelemetry/semantic-conventions'
 import {
   BatchSpanProcessor,
   SimpleSpanProcessor,
+  SpanProcessor,
+  ReadableSpan,
 } from '@opentelemetry/sdk-trace-node';
 import * as api from '@opentelemetry/api';
 import { registerInstrumentations } from '@opentelemetry/instrumentation';
 import { HttpInstrumentation } from '@opentelemetry/instrumentation-http';
 import { FetchInstrumentation } from '@opentelemetry/instrumentation-fetch';
 import { SnapshotClient } from './snapshot-client';
+import * as https from 'https';
+import * as http from 'http';
+
+/**
+ * Span processor that sends traces to TraceKit Local UI in development mode
+ */
+class LocalUISpanProcessor implements SpanProcessor {
+  private localUIAvailable: boolean = false;
+  private checkedHealth: boolean = false;
+  private batchedSpans: ReadableSpan[] = [];
+  private batchTimer: NodeJS.Timeout | null = null;
+  private readonly LOCAL_UI_URL = 'http://localhost:9999';
+  private readonly BATCH_TIMEOUT_MS = 1000;
+  private readonly MAX_BATCH_SIZE = 100;
+
+  async detectLocalUI(): Promise<boolean> {
+    if (this.checkedHealth) {
+      return this.localUIAvailable;
+    }
+
+    return new Promise((resolve) => {
+      const req = http.request(
+        `${this.LOCAL_UI_URL}/api/health`,
+        {
+          method: 'GET',
+          timeout: 500,
+        },
+        (res) => {
+          this.localUIAvailable = res.statusCode === 200;
+          this.checkedHealth = true;
+          if (this.localUIAvailable) {
+            console.log('🔍 Local UI detected at http://localhost:9999');
+          }
+          resolve(this.localUIAvailable);
+        }
+      );
+
+      req.on('error', () => {
+        this.localUIAvailable = false;
+        this.checkedHealth = true;
+        resolve(false);
+      });
+
+      req.on('timeout', () => {
+        req.destroy();
+        this.localUIAvailable = false;
+        this.checkedHealth = true;
+        resolve(false);
+      });
+
+      req.end();
+    });
+  }
+
+  onStart(span: api.Span): void {
+    // No-op
+  }
+
+  onEnd(span: ReadableSpan): void {
+    // Only process in development mode
+    if (process.env.NODE_ENV !== 'development') {
+      return;
+    }
+
+    // Add to batch
+    this.batchedSpans.push(span);
+
+    // If batch is full, send immediately
+    if (this.batchedSpans.length >= this.MAX_BATCH_SIZE) {
+      this.flushBatch();
+    } else if (!this.batchTimer) {
+      // Schedule batch send
+      this.batchTimer = setTimeout(() => {
+        this.flushBatch();
+      }, this.BATCH_TIMEOUT_MS);
+    }
+  }
+
+  private async flushBatch(): Promise<void> {
+    if (this.batchTimer) {
+      clearTimeout(this.batchTimer);
+      this.batchTimer = null;
+    }
+
+    if (this.batchedSpans.length === 0) {
+      return;
+    }
+
+    // Check if local UI is available
+    const isAvailable = await this.detectLocalUI();
+    if (!isAvailable) {
+      this.batchedSpans = [];
+      return;
+    }
+
+    // Convert spans to OTLP format
+    const resourceSpans = this.convertSpansToOTLP(this.batchedSpans);
+    const payload = JSON.stringify(resourceSpans);
+    this.batchedSpans = [];
+
+    // Send to local UI (fire and forget)
+    this.sendToLocalUI(payload);
+  }
+
+  private sendToLocalUI(payload: string): void {
+    const req = http.request(
+      `${this.LOCAL_UI_URL}/v1/traces`,
+      {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Content-Length': Buffer.byteLength(payload),
+        },
+        timeout: 1000,
+      },
+      (res) => {
+        // Consume response to free up socket
+        res.resume();
+      }
+    );
+
+    req.on('error', () => {
+      // Silently fail if local UI is not available
+    });
+
+    req.on('timeout', () => {
+      req.destroy();
+    });
+
+    req.write(payload);
+    req.end();
+  }
+
+  private convertSpansToOTLP(spans: ReadableSpan[]): any {
+    // Group spans by resource
+    const resourceSpansMap = new Map<string, any>();
+
+    for (const span of spans) {
+      const resourceKey = JSON.stringify(span.resource.attributes);
+
+      if (!resourceSpansMap.has(resourceKey)) {
+        resourceSpansMap.set(resourceKey, {
+          resource: {
+            attributes: this.convertAttributes(span.resource.attributes),
+          },
+          scopeSpans: [],
+        });
+      }
+
+      const resourceSpans = resourceSpansMap.get(resourceKey);
+
+      // Find or create scope spans
+      let scopeSpan = resourceSpans.scopeSpans.find(
+        (ss: any) => ss.scope?.name === span.instrumentationLibrary.name
+      );
+
+      if (!scopeSpan) {
+        scopeSpan = {
+          scope: {
+            name: span.instrumentationLibrary.name,
+            version: span.instrumentationLibrary.version,
+          },
+          spans: [],
+        };
+        resourceSpans.scopeSpans.push(scopeSpan);
+      }
+
+      // Add span
+      scopeSpan.spans.push(this.convertSpan(span));
+    }
+
+    return {
+      resourceSpans: Array.from(resourceSpansMap.values()),
+    };
+  }
+
+  private convertSpan(span: ReadableSpan): any {
+    return {
+      traceId: span.spanContext().traceId,
+      spanId: span.spanContext().spanId,
+      parentSpanId: span.parentSpanId,
+      name: span.name,
+      kind: span.kind,
+      startTimeUnixNano: String(span.startTime[0] * 1e9 + span.startTime[1]),
+      endTimeUnixNano: String(span.endTime[0] * 1e9 + span.endTime[1]),
+      attributes: this.convertAttributes(span.attributes),
+      events: span.events.map((event) => ({
+        timeUnixNano: String(event.time[0] * 1e9 + event.time[1]),
+        name: event.name,
+        attributes: this.convertAttributes(event.attributes || {}),
+      })),
+      status: {
+        code: span.status.code,
+        message: span.status.message,
+      },
+    };
+  }
+
+  private convertAttributes(attributes: any): any[] {
+    return Object.entries(attributes).map(([key, value]) => ({
+      key,
+      value: this.convertValue(value),
+    }));
+  }
+
+  private convertValue(value: any): any {
+    if (typeof value === 'string') {
+      return { stringValue: value };
+    } else if (typeof value === 'number') {
+      if (Number.isInteger(value)) {
+        return { intValue: String(value) };
+      }
+      return { doubleValue: value };
+    } else if (typeof value === 'boolean') {
+      return { boolValue: value };
+    } else if (Array.isArray(value)) {
+      return {
+        arrayValue: {
+          values: value.map((v) => this.convertValue(v)),
+        },
+      };
+    }
+    return { stringValue: String(value) };
+  }
+
+  async forceFlush(): Promise<void> {
+    await this.flushBatch();
+  }
+
+  async shutdown(): Promise<void> {
+    await this.flushBatch();
+  }
+}
 
 export interface TracekitConfig {
   apiKey: string;
@@ -57,7 +292,7 @@ export class TracekitClient {
     });
 
     if (this.config.enabled) {
-      // Configure OTLP exporter
+      // Configure OTLP exporter for cloud
       const exporter = new OTLPTraceExporter({
         url: this.config.endpoint,
         headers: {
@@ -67,6 +302,11 @@ export class TracekitClient {
 
       // Use batch processor for better performance
       this.provider.addSpanProcessor(new BatchSpanProcessor(exporter));
+
+      // Add local UI processor in development mode
+      if (process.env.NODE_ENV === 'development') {
+        this.provider.addSpanProcessor(new LocalUISpanProcessor());
+      }
 
       // Register the provider
       this.provider.register();
