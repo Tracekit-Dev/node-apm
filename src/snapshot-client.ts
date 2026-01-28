@@ -15,6 +15,12 @@ export interface BreakpointConfig {
   enabled: boolean;
 }
 
+export interface SecurityFlag {
+  type: string;
+  severity: string;
+  variable?: string;
+}
+
 export interface Snapshot {
   breakpoint_id?: string;
   service_name: string;
@@ -23,6 +29,7 @@ export interface Snapshot {
   label?: string;
   line_number: number;
   variables: Record<string, any>;
+  security_flags?: SecurityFlag[];
   stack_trace: string;
   trace_id?: string;
   span_id?: string;
@@ -118,6 +125,9 @@ export class SnapshotClient {
     // Extract request context (from AsyncLocalStorage or global)
     const requestContext = this.extractRequestContext();
 
+    // Scan variables for security issues
+    const securityScan = this.scanForSecurityIssues(variables);
+
     // Create snapshot
     const snapshot: Snapshot = {
       breakpoint_id: breakpoint.id,
@@ -126,7 +136,8 @@ export class SnapshotClient {
       function_name: functionName,
       label,
       line_number: line,
-      variables: this.sanitizeVariables(variables),
+      variables: securityScan.variables,
+      security_flags: securityScan.flags,
       stack_trace: stack,
       request_context: requestContext,
       captured_at: new Date(),
@@ -284,5 +295,54 @@ export class SnapshotClient {
     }
 
     return sanitized;
+  }
+
+  // Scan variables for security issues (passwords, API keys, etc.)
+  private scanForSecurityIssues(variables: Record<string, any>): {
+    variables: Record<string, any>;
+    flags: SecurityFlag[];
+  } {
+    const sensitivePatterns: Record<string, RegExp> = {
+      password: /(?:password|passwd|pwd)\s*[=:]\s*["']?[^\s"']{6,}/i,
+      api_key: /(?:api[_-]?key|apikey)\s*[=:]\s*["']?[A-Za-z0-9_-]{20,}/i,
+      jwt: /eyJ[A-Za-z0-9_-]*\.eyJ[A-Za-z0-9_-]*\.[A-Za-z0-9_-]*/,
+      credit_card: /\b(?:4[0-9]{12}(?:[0-9]{3})?|5[1-5][0-9]{14})\b/,
+    };
+
+    const securityFlags: SecurityFlag[] = [];
+    const sanitized = this.sanitizeVariables(variables);
+
+    // Scan variable names and values
+    for (const [name, value] of Object.entries(variables)) {
+      // Check variable names for sensitive patterns
+      if (/password|secret|token|key|credential/i.test(name)) {
+        securityFlags.push({
+          type: 'sensitive_variable_name',
+          severity: 'medium',
+          variable: name,
+        });
+        sanitized[name] = '[REDACTED]';
+        continue;
+      }
+
+      // Check variable values for sensitive data
+      const serialized = JSON.stringify(value);
+      for (const [type, pattern] of Object.entries(sensitivePatterns)) {
+        if (pattern.test(serialized)) {
+          securityFlags.push({
+            type: `sensitive_data_${type}`,
+            severity: 'high',
+            variable: name,
+          });
+          sanitized[name] = '[REDACTED]';
+          break;
+        }
+      }
+    }
+
+    return {
+      variables: sanitized,
+      flags: securityFlags,
+    };
   }
 }
