@@ -122,7 +122,18 @@ function getOperationName(req: Request): string {
   return `${req.method} ${req.path}`;
 }
 
-function getClientIp(req: Request): string {
+/**
+ * Extract client IP address from HTTP request.
+ * Checks X-Forwarded-For, X-Real-IP headers (for proxied requests)
+ * and falls back to socket.remoteAddress.
+ *
+ * This function is automatically used by the TraceKit middleware to add
+ * client IP to all traces for DDoS detection and traffic analysis.
+ *
+ * @param req - Express Request object
+ * @returns Client IP address or empty string if not found
+ */
+export function getClientIp(req: Request): string {
   return (
     (req.headers['x-forwarded-for'] as string)?.split(',')[0]?.trim() ||
     (req.headers['x-real-ip'] as string) ||

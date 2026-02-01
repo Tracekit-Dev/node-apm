@@ -14,6 +14,7 @@ Zero-config distributed tracing and performance monitoring for Express and NestJ
 - **NestJS Support** - Module and interceptor-based tracing
 - **TypeScript First** - Full type definitions included
 - **HTTP Request Tracing** - Track every request, route, and handler
+- **Client IP Capture** - Automatic IP detection for DDoS & traffic analysis
 - **Error Tracking** - Capture exceptions with full context
 - **Code Monitoring** - Live debugging with breakpoints and variable inspection
 - **Low Overhead** - < 5% performance impact

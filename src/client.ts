@@ -542,6 +542,11 @@ export class TracekitClient {
   private normalizeAttributes(attributes: Record<string, any>): Record<string, api.AttributeValue> {
     const normalized: Record<string, api.AttributeValue> = {};
     for (const [key, value] of Object.entries(attributes)) {
+      // Skip empty string values (especially for client_ip)
+      if (value === '' || value === null || value === undefined) {
+        continue;
+      }
+
       if (
         typeof value === 'string' ||
         typeof value === 'number' ||

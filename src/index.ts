@@ -39,7 +39,7 @@ export function getClient(): TracekitClient {
 // Export types
 export { TracekitClient, TracekitConfig } from './client';
 export { SnapshotClient } from './snapshot-client';
-export { createExpressMiddleware, getCurrentSpan } from './middleware/express';
+export { createExpressMiddleware, getCurrentSpan, getClientIp } from './middleware/express';
 
 // Re-export OpenTelemetry types for convenience
 export { Span, Context } from '@opentelemetry/api';
