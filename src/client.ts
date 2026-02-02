@@ -13,6 +13,7 @@ import { registerInstrumentations } from '@opentelemetry/instrumentation';
 import { HttpInstrumentation } from '@opentelemetry/instrumentation-http';
 import { FetchInstrumentation } from '@opentelemetry/instrumentation-fetch';
 import { SnapshotClient } from './snapshot-client';
+import { MetricsRegistry, Counter, Gauge, Histogram, noopCounter, noopGauge, noopHistogram } from './metrics';
 import * as https from 'https';
 import * as http from 'http';
 
@@ -250,6 +251,8 @@ class LocalUISpanProcessor implements SpanProcessor {
 export interface TracekitConfig {
   apiKey: string;
   endpoint?: string;
+  tracesPath?: string;
+  metricsPath?: string;
   serviceName?: string;
   enabled?: boolean;
   sampleRate?: number;
@@ -263,15 +266,99 @@ export interface TracekitConfig {
   serviceNameMappings?: Record<string, string>;
 }
 
+/**
+ * Resolve endpoint URL from base endpoint and path
+ */
+export function resolveEndpoint(endpoint: string, path: string, useSSL: boolean = true): string {
+  // If endpoint has a scheme (http:// or https://)
+  if (endpoint.startsWith('http://') || endpoint.startsWith('https://')) {
+    endpoint = endpoint.replace(/\/$/, ''); // Remove trailing slash
+
+    const trimmed = endpoint.replace(/^https?:\/\//, '');
+
+    // If endpoint has a path component
+    if (trimmed.includes('/')) {
+      // Always extract base URL and append correct path
+      const base = extractBaseURL(endpoint);
+      if (path === '') {
+        return base;
+      }
+      return base + path;
+    }
+
+    // Just host with scheme, add the path
+    return endpoint + path;
+  }
+
+  // No scheme provided - build URL with scheme
+  const scheme = useSSL ? 'https://' : 'http://';
+  endpoint = endpoint.replace(/\/$/, ''); // Remove trailing slash
+  return scheme + endpoint + path;
+}
+
+/**
+ * Extract base URL (scheme + host) from full URL, only if it contains
+ * known service-specific paths
+ */
+export function extractBaseURL(fullURL: string): string {
+  // Check if URL contains known service-specific paths
+  const hasServicePath =
+    fullURL.includes('/v1/traces') ||
+    fullURL.includes('/v1/metrics') ||
+    fullURL.includes('/api/v1/traces') ||
+    fullURL.includes('/api/v1/metrics');
+
+  // If it doesn't have a service-specific path, keep the URL as-is
+  if (!hasServicePath) {
+    return fullURL;
+  }
+
+  // Extract scheme
+  let scheme = '';
+  let remaining = fullURL;
+
+  if (fullURL.startsWith('https://')) {
+    scheme = 'https://';
+    remaining = fullURL.substring(8);
+  } else if (fullURL.startsWith('http://')) {
+    scheme = 'http://';
+    remaining = fullURL.substring(7);
+  } else {
+    return fullURL;
+  }
+
+  // Find first "/" to separate host from path
+  const idx = remaining.indexOf('/');
+  if (idx !== -1) {
+    return scheme + remaining.substring(0, idx);
+  }
+
+  return scheme + remaining;
+}
+
 export class TracekitClient {
   private provider: NodeTracerProvider;
   private tracer: api.Tracer;
   private config: Required<TracekitConfig>;
   private snapshotClient?: SnapshotClient;
+  private metricsRegistry?: MetricsRegistry;
 
   constructor(config: TracekitConfig) {
+    // Set defaults
+    const endpoint = config.endpoint || 'app.tracekit.dev';
+    const tracesPath = config.tracesPath || '/v1/traces';
+    const metricsPath = config.metricsPath || '/v1/metrics';
+    const useSSL = !endpoint.startsWith('http://'); // Auto-detect SSL from endpoint
+
+    // Resolve full endpoint URLs
+    const tracesEndpoint = resolveEndpoint(endpoint, tracesPath, useSSL);
+    const metricsEndpoint = resolveEndpoint(endpoint, metricsPath, useSSL);
+    const baseEndpoint = resolveEndpoint(endpoint, '', useSSL);
+
     this.config = {
-      endpoint: config.endpoint || 'https://app.tracekit.dev/v1/traces',
+      endpoint: tracesEndpoint, // For backward compatibility
+      tracesPath,
+      metricsPath,
       serviceName: config.serviceName || 'node-app',
       enabled: config.enabled ?? true,
       sampleRate: config.sampleRate ?? 1.0,
@@ -294,7 +381,7 @@ export class TracekitClient {
     if (this.config.enabled) {
       // Configure OTLP exporter for cloud
       const exporter = new OTLPTraceExporter({
-        url: this.config.endpoint,
+        url: tracesEndpoint,
         headers: {
           'X-API-Key': this.config.apiKey,
         },
@@ -341,11 +428,14 @@ export class TracekitClient {
 
     this.tracer = api.trace.getTracer('@tracekit/node-apm', '1.0.0');
 
+    // Initialize metrics registry
+    this.metricsRegistry = new MetricsRegistry(metricsEndpoint, this.config.apiKey, this.config.serviceName);
+
     // Initialize snapshot client if enabled
     if (this.config.enableCodeMonitoring) {
       this.snapshotClient = new SnapshotClient(
         this.config.apiKey,
-        this.config.endpoint.replace('/v1/traces', ''),
+        baseEndpoint,
         this.config.serviceName
       );
       this.snapshotClient.start();
@@ -478,6 +568,11 @@ export class TracekitClient {
       this.snapshotClient.stop();
     }
 
+    // Shutdown metrics registry
+    if (this.metricsRegistry) {
+      await this.metricsRegistry.shutdown();
+    }
+
     // Shutdown tracing provider
     await this.provider.shutdown();
   }
@@ -504,6 +599,28 @@ export class TracekitClient {
     if (this.snapshotClient) {
       await this.snapshotClient.checkAndCaptureWithContext(label, variables);
     }
+  }
+
+  // Metrics methods
+  counter(name: string, tags: Record<string, string> = {}): Counter {
+    if (this.metricsRegistry) {
+      return this.metricsRegistry.counter(name, tags);
+    }
+    return noopCounter;
+  }
+
+  gauge(name: string, tags: Record<string, string> = {}): Gauge {
+    if (this.metricsRegistry) {
+      return this.metricsRegistry.gauge(name, tags);
+    }
+    return noopGauge;
+  }
+
+  histogram(name: string, tags: Record<string, string> = {}): Histogram {
+    if (this.metricsRegistry) {
+      return this.metricsRegistry.histogram(name, tags);
+    }
+    return noopHistogram;
   }
 
   private extractServiceName(hostname: string): string {
