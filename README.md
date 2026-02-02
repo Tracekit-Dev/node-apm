@@ -17,6 +17,7 @@ Zero-config distributed tracing and performance monitoring for Express and NestJ
 - **Client IP Capture** - Automatic IP detection for DDoS & traffic analysis
 - **Error Tracking** - Capture exceptions with full context
 - **Code Monitoring** - Live debugging with breakpoints and variable inspection
+- **Metrics API** - Counter, Gauge, and Histogram metrics with automatic OTLP export
 - **Low Overhead** - < 5% performance impact
 
 ## Installation
@@ -254,6 +255,225 @@ export class PaymentService {
 ```
 
 Get your API key at [https://app.tracekit.dev](https://app.tracekit.dev)
+
+## Metrics
+
+TraceKit APM includes a powerful metrics API for tracking application performance and business metrics.
+
+### Metric Types
+
+TraceKit supports three types of metrics:
+
+- **Counter**: Monotonically increasing values (requests, errors, events)
+- **Gauge**: Point-in-time values that can go up or down (active connections, queue size)
+- **Histogram**: Value distributions (request duration, payload sizes)
+
+### Basic Usage
+
+```typescript
+import * as tracekit from '@tracekit/node-apm';
+
+const client = tracekit.init({
+  apiKey: process.env.TRACEKIT_API_KEY!,
+  serviceName: 'my-app',
+});
+
+// Create metrics
+const requestCounter = client.counter('http.requests.total', {
+  service: 'my-app'
+});
+
+const activeRequestsGauge = client.gauge('http.requests.active', {
+  service: 'my-app'
+});
+
+const requestDurationHistogram = client.histogram('http.request.duration', {
+  unit: 'ms'
+});
+
+// Use metrics in your handlers
+app.use((req, res, next) => {
+  const startTime = Date.now();
+
+  activeRequestsGauge.inc();
+
+  res.on('finish', () => {
+    requestCounter.inc();
+    activeRequestsGauge.dec();
+
+    const duration = Date.now() - startTime;
+    requestDurationHistogram.record(duration);
+  });
+
+  next();
+});
+```
+
+### Counter
+
+Counters track monotonically increasing values:
+
+```typescript
+const counter = client.counter('events.processed', { type: 'order' });
+
+// Increment by 1
+counter.inc();
+
+// Add custom amount
+counter.add(5);
+```
+
+### Gauge
+
+Gauges track values that can increase or decrease:
+
+```typescript
+const gauge = client.gauge('queue.size', { queue: 'orders' });
+
+// Set to specific value
+gauge.set(42);
+
+// Increment
+gauge.inc();
+
+// Decrement
+gauge.dec();
+```
+
+### Histogram
+
+Histograms track distributions of values:
+
+```typescript
+const histogram = client.histogram('api.response.size', { unit: 'bytes' });
+
+// Record a value
+histogram.record(1024);
+histogram.record(2048);
+```
+
+### Express Example
+
+```typescript
+import express from 'express';
+import * as tracekit from '@tracekit/node-apm';
+
+const app = express();
+const client = tracekit.init({
+  apiKey: process.env.TRACEKIT_API_KEY!,
+  serviceName: 'express-app',
+});
+
+app.use(tracekit.middleware());
+
+// Initialize metrics
+const requestCounter = client.counter('http.requests.total');
+const activeRequests = client.gauge('http.requests.active');
+const requestDuration = client.histogram('http.request.duration', { unit: 'ms' });
+const errorCounter = client.counter('http.errors.total');
+
+// Metrics middleware
+app.use((req, res, next) => {
+  const start = Date.now();
+  activeRequests.inc();
+
+  res.on('finish', () => {
+    requestCounter.inc();
+    activeRequests.dec();
+    requestDuration.record(Date.now() - start);
+
+    if (res.statusCode >= 400) {
+      errorCounter.inc();
+    }
+  });
+
+  next();
+});
+
+app.get('/', (req, res) => {
+  res.send('Hello World');
+});
+
+app.listen(3000);
+```
+
+### NestJS Example
+
+```typescript
+import { Injectable, NestMiddleware } from '@nestjs/common';
+import { Request, Response, NextFunction } from 'express';
+import * as tracekit from '@tracekit/node-apm';
+
+@Injectable()
+export class MetricsMiddleware implements NestMiddleware {
+  private requestCounter = tracekit.getClient().counter('http.requests.total');
+  private activeRequests = tracekit.getClient().gauge('http.requests.active');
+  private requestDuration = tracekit.getClient().histogram('http.request.duration', { unit: 'ms' });
+
+  use(req: Request, res: Response, next: NextFunction) {
+    const start = Date.now();
+    this.activeRequests.inc();
+
+    res.on('finish', () => {
+      this.requestCounter.inc();
+      this.activeRequests.dec();
+      this.requestDuration.record(Date.now() - start);
+    });
+
+    next();
+  }
+}
+```
+
+### Tags
+
+Add tags to metrics for dimensional analysis:
+
+```typescript
+const counter = client.counter('api.requests', {
+  service: 'payment-api',
+  region: 'us-east-1',
+  environment: 'production'
+});
+
+counter.inc();
+```
+
+### Common Use Cases
+
+#### HTTP Request Tracking
+
+```typescript
+const requests = client.counter('http.requests', { method: 'POST', endpoint: '/api/orders' });
+const duration = client.histogram('http.duration', { endpoint: '/api/orders' });
+const errors = client.counter('http.errors', { code: '500' });
+```
+
+#### Database Metrics
+
+```typescript
+const queries = client.counter('db.queries', { operation: 'SELECT' });
+const queryDuration = client.histogram('db.query.duration', { unit: 'ms' });
+const connections = client.gauge('db.connections.active');
+```
+
+#### Business Metrics
+
+```typescript
+const orders = client.counter('orders.created');
+const revenue = client.histogram('orders.amount', { unit: 'usd' });
+const inventory = client.gauge('inventory.stock', { product: 'laptop' });
+```
+
+### Metric Export
+
+Metrics are automatically buffered and exported in batches:
+
+- **Buffer size**: 100 metrics
+- **Flush interval**: 10 seconds
+- **Endpoint**: Automatically resolved to `/v1/metrics`
+
+Metrics are sent to TraceKit using OTLP format and appear in your dashboard with full dimensional analysis.
 
 ## Configuration
 
