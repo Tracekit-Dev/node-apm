@@ -20,11 +20,9 @@ export function createExpressMiddleware(client: TracekitClient, snapshotClient?:
 
     const startTime = Date.now();
 
-    // Get operation name from route
     const operationName = getOperationName(req);
 
-    // Extract trace context from incoming request headers (W3C Trace Context)
-    // This enables distributed tracing - the span will be linked to the parent trace
+    // Extract W3C Trace Context from incoming headers for distributed tracing
     const parentContext = propagator.extract(
       api.context.active(),
       req.headers,
@@ -38,8 +36,6 @@ export function createExpressMiddleware(client: TracekitClient, snapshotClient?:
       }
     );
 
-    // Start trace within the parent context (if any)
-    // This ensures the new span is a child of the incoming trace
     const span = api.context.with(parentContext, () => {
       return client.startServerSpan(operationName, {
         'http.method': req.method,
@@ -50,10 +46,8 @@ export function createExpressMiddleware(client: TracekitClient, snapshotClient?:
       });
     });
 
-    // Store span in request for nested spans
     (req as any).__tracekitSpan = span;
 
-    // Extract request context for snapshots
     const requestContext = {
       method: req.method,
       path: req.path,
@@ -64,40 +58,44 @@ export function createExpressMiddleware(client: TracekitClient, snapshotClient?:
       headers: filterHeaders(req.headers),
     };
 
-    // Store in AsyncLocalStorage for snapshot access
-    requestContextStorage.run(requestContext, () => {
-      // Capture response
-      const originalSend = res.send;
-      let responseSent = false;
+    // Set active span context to enable database auto-instrumentation
+    const spanContext = api.trace.setSpan(parentContext, span);
 
-      res.send = function (body: any): Response {
-        if (!responseSent) {
-          responseSent = true;
-          const durationMs = Date.now() - startTime;
+    api.context.with(spanContext, () => {
+      requestContextStorage.run(requestContext, () => {
+        // Capture response
+        const originalSend = res.send;
+        let responseSent = false;
 
-          client.endSpan(
-            span,
-            {
-              'http.status_code': res.statusCode,
-              'http.duration_ms': durationMs,
-            },
-            res.statusCode >= 400 ? 'ERROR' : 'OK'
-          );
+        res.send = function (body: any): Response {
+          if (!responseSent) {
+            responseSent = true;
+            const durationMs = Date.now() - startTime;
+
+            client.endSpan(
+              span,
+              {
+                'http.status_code': res.statusCode,
+                'http.duration_ms': durationMs,
+              },
+              res.statusCode >= 400 ? 'ERROR' : 'OK'
+            );
+          }
+
+          return originalSend.call(this, body);
+        };
+
+        // Handle errors
+        try {
+          next();
+        } catch (error) {
+          if (error instanceof Error) {
+            client.recordException(span, error);
+            client.endSpan(span, {}, 'ERROR');
+          }
+          throw error;
         }
-
-        return originalSend.call(this, body);
-      };
-
-      // Handle errors
-      try {
-        next();
-      } catch (error) {
-        if (error instanceof Error) {
-          client.recordException(span, error);
-          client.endSpan(span, {}, 'ERROR');
-        }
-        throw error;
-      }
+      });
     });
   };
 }

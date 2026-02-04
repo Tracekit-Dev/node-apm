@@ -430,20 +430,16 @@ export class TracekitClient {
         });
       }
 
-      // Auto-instrument databases for CLIENT span creation
       registerInstrumentations({
         tracerProvider: this.provider,
         instrumentations: [
-          // PostgreSQL (pg library)
-          new PgInstrumentation({}),
-          // MySQL (mysql library)
-          new MySQLInstrumentation({}),
-          // MySQL2 (mysql2 library)
-          new MySQL2Instrumentation({}),
-          // MongoDB
-          new MongoDBInstrumentation({}),
-          // Redis v4+
-          new RedisInstrumentationV4({}),
+          new PgInstrumentation({
+            enhancedDatabaseReporting: true,
+          }),
+          new MySQLInstrumentation(),
+          new MySQL2Instrumentation(),
+          new MongoDBInstrumentation(),
+          new RedisInstrumentationV4(),
         ],
       });
     }
