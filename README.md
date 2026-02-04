@@ -14,6 +14,7 @@ Zero-config distributed tracing and performance monitoring for Express and NestJ
 - **NestJS Support** - Module and interceptor-based tracing
 - **TypeScript First** - Full type definitions included
 - **HTTP Request Tracing** - Track every request, route, and handler
+- **Database Tracing** - Automatic query instrumentation for PostgreSQL, MySQL, MongoDB, Redis
 - **Client IP Capture** - Automatic IP detection for DDoS & traffic analysis
 - **Error Tracking** - Capture exceptions with full context
 - **Code Monitoring** - Live debugging with breakpoints and variable inspection
@@ -652,6 +653,41 @@ Every HTTP request from your service is automatically traced with:
 - HTTP status code
 - Request duration
 - `peer.service` attribute for service dependency mapping
+
+### Database Queries (CLIENT spans)
+
+All database operations are automatically traced with zero configuration:
+
+**PostgreSQL** (`pg` library):
+- SQL query statements
+- Query parameters
+- Database name
+- Response time
+
+**MySQL** (`mysql`/`mysql2` libraries):
+- SQL query statements
+- Query parameters
+- Database name
+- Response time
+
+**MongoDB**:
+- Collection operations (find, insert, update, delete)
+- Query filters
+- Database and collection names
+- Response time
+
+**Redis**:
+- Commands (GET, SET, HGET, etc.)
+- Keys accessed
+- Response time
+
+Example trace hierarchy:
+```
+GET /users/:id (kind: Server)
+  ├─ SELECT * FROM users WHERE id = $1 (kind: Client, db.system: postgresql)
+  ├─ GET user:123:cache (kind: Client, db.system: redis)
+  └─ INSERT INTO audit_logs... (kind: Client, db.system: postgresql)
+```
 
 ### Errors and Exceptions
 

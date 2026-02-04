@@ -12,6 +12,11 @@ import * as api from '@opentelemetry/api';
 import { registerInstrumentations } from '@opentelemetry/instrumentation';
 import { HttpInstrumentation } from '@opentelemetry/instrumentation-http';
 import { FetchInstrumentation } from '@opentelemetry/instrumentation-fetch';
+import { MongoDBInstrumentation } from '@opentelemetry/instrumentation-mongodb';
+import { MySQLInstrumentation } from '@opentelemetry/instrumentation-mysql';
+import { MySQL2Instrumentation } from '@opentelemetry/instrumentation-mysql2';
+import { PgInstrumentation } from '@opentelemetry/instrumentation-pg';
+import { RedisInstrumentation as RedisInstrumentationV4 } from '@opentelemetry/instrumentation-redis-4';
 import { SnapshotClient } from './snapshot-client';
 import { MetricsRegistry, Counter, Gauge, Histogram, noopCounter, noopGauge, noopHistogram } from './metrics';
 import * as https from 'https';
@@ -424,6 +429,23 @@ export class TracekitClient {
           ],
         });
       }
+
+      // Auto-instrument databases for CLIENT span creation
+      registerInstrumentations({
+        tracerProvider: this.provider,
+        instrumentations: [
+          // PostgreSQL (pg library)
+          new PgInstrumentation({}),
+          // MySQL (mysql library)
+          new MySQLInstrumentation({}),
+          // MySQL2 (mysql2 library)
+          new MySQL2Instrumentation({}),
+          // MongoDB
+          new MongoDBInstrumentation({}),
+          // Redis v4+
+          new RedisInstrumentationV4({}),
+        ],
+      });
     }
 
     this.tracer = api.trace.getTracer('@tracekit/node-apm', '1.0.0');
