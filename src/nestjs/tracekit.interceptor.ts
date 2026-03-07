@@ -67,7 +67,7 @@ export class TracekitInterceptor implements NestInterceptor {
           console.warn('TraceKit: Failed to flush traces', err);
         });
       }),
-      catchError((error) => {
+      catchError((error: Error) => {
         // Error
         const [seconds, nanos] = process.hrtime(startTime);
         const durationMs = seconds * 1000 + nanos / 1_000_000;
