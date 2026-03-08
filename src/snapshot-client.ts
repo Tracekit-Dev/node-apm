@@ -1,4 +1,5 @@
 import * as http from 'http';
+import * as api from '@opentelemetry/api';
 import { getRequestContext } from './middleware/express';
 
 export interface BreakpointConfig {
@@ -290,6 +291,18 @@ export class SnapshotClient {
       }
     }
 
+    // Extract trace context from OpenTelemetry
+    let traceId: string | undefined;
+    let spanId: string | undefined;
+    const activeSpan = api.trace.getActiveSpan();
+    if (activeSpan) {
+      const spanContext = activeSpan.spanContext();
+      if (spanContext && api.isSpanContextValid(spanContext) && (spanContext.traceFlags & api.TraceFlags.SAMPLED) !== 0) {
+        traceId = spanContext.traceId;
+        spanId = spanContext.spanId;
+      }
+    }
+
     // Create snapshot
     const snapshot: Snapshot = {
       breakpoint_id: breakpoint.id,
@@ -301,6 +314,8 @@ export class SnapshotClient {
       variables: finalVariables,
       security_flags: securityScan.flags,
       stack_trace: stack,
+      trace_id: traceId,
+      span_id: spanId,
       request_context: requestContext,
       captured_at: new Date(),
     };
