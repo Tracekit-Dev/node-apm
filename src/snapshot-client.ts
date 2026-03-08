@@ -536,6 +536,7 @@ export class SnapshotClient {
         case 'kill_switch': {
           const ksData = JSON.parse(data) as { enabled: boolean };
           this.killSwitchActive = ksData.enabled;
+          this.schedulePoll();
           if (ksData.enabled) {
             console.log('TraceKit: Kill switch enabled via SSE, closing connection');
             if (this.sseAbortController) {
@@ -546,7 +547,8 @@ export class SnapshotClient {
         }
 
         case 'heartbeat':
-          // No action needed -- keeps connection alive
+        case 'sdk_count':
+          // No action needed -- heartbeat keeps connection alive, sdk_count is for dashboard UI
           break;
 
         default:
