@@ -19,6 +19,9 @@ import { PgInstrumentation } from '@opentelemetry/instrumentation-pg';
 import { RedisInstrumentation as RedisInstrumentationV4 } from '@opentelemetry/instrumentation-redis-4';
 import { SnapshotClient } from './snapshot-client';
 import { MetricsRegistry, Counter, Gauge, Histogram, noopCounter, noopGauge, noopHistogram } from './metrics';
+import { LLMConfig, resolveCaptureContent } from './integrations/llm-common';
+import { instrumentOpenAI } from './integrations/openai';
+import { instrumentAnthropic } from './integrations/anthropic';
 import * as https from 'https';
 import * as http from 'http';
 
@@ -269,6 +272,16 @@ export interface TracekitConfig {
    * Example: { 'localhost:8082': 'go-test-app', 'localhost:8084': 'node-test-app' }
    */
   serviceNameMappings?: Record<string, string>;
+  /**
+   * LLM auto-instrumentation config.
+   * When enabled, auto-detects and patches OpenAI/Anthropic client libraries.
+   */
+  instrumentLLM?: LLMConfig;
+  /**
+   * Capture prompt/completion content in LLM spans (default: false).
+   * Can be overridden by TRACEKIT_LLM_CAPTURE_CONTENT env var.
+   */
+  captureContent?: boolean;
 }
 
 /**
@@ -371,6 +384,8 @@ export class TracekitClient {
       autoInstrumentHttpClient: config.autoInstrumentHttpClient ?? true,
       apiKey: config.apiKey,
       serviceNameMappings: config.serviceNameMappings ?? {},
+      instrumentLLM: config.instrumentLLM ?? {},
+      captureContent: config.captureContent ?? false,
     };
 
     // Create resource with service name
@@ -445,6 +460,25 @@ export class TracekitClient {
     }
 
     this.tracer = api.trace.getTracer('@tracekit/node-apm', '1.0.0');
+
+    // Auto-detect and instrument LLM libraries
+    if (this.config.enabled) {
+      const llmConfig: LLMConfig = {
+        ...config.instrumentLLM,
+        captureContent: config.captureContent ?? config.instrumentLLM?.captureContent,
+      };
+      // Resolve captureContent from env var override
+      llmConfig.captureContent = resolveCaptureContent(llmConfig);
+
+      if (llmConfig.enabled !== false) {
+        if (llmConfig.openai !== false) {
+          try { instrumentOpenAI(this.tracer, llmConfig); } catch (_e) { /* silent */ }
+        }
+        if (llmConfig.anthropic !== false) {
+          try { instrumentAnthropic(this.tracer, llmConfig); } catch (_e) { /* silent */ }
+        }
+      }
+    }
 
     // Initialize metrics registry
     this.metricsRegistry = new MetricsRegistry(metricsEndpoint, this.config.apiKey, this.config.serviceName);
