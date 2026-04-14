@@ -1,6 +1,7 @@
 import * as http from 'http';
 import * as api from '@opentelemetry/api';
 import { getRequestContext } from './middleware/express';
+import { evaluateCondition, evaluateExpressions, isSDKEvaluable, UnsupportedExpressionError } from './evaluator';
 
 export interface BreakpointConfig {
   id: string;
@@ -14,6 +15,14 @@ export interface BreakpointConfig {
   capture_count: number;
   expire_at?: Date;
   enabled: boolean;
+  // v25 fields
+  mode?: 'snapshot' | 'logpoint';
+  stack_depth?: number | null;
+  max_depth?: number | null;
+  max_payload_bytes?: number | null;
+  condition_eval?: 'sdk-evaluable' | 'server-only';
+  capture_expressions?: string[];
+  idle_timeout_hours?: number | null;
 }
 
 export interface SecurityFlag {
@@ -35,6 +44,7 @@ export interface Snapshot {
   trace_id?: string;
   span_id?: string;
   request_context?: Record<string, any>;
+  expression_results?: Record<string, any>;
   captured_at: Date;
 }
 
@@ -264,9 +274,57 @@ export class SnapshotClient {
       return;
     }
 
-    // Apply opt-in capture depth limit
-    if (this.captureConfig.captureDepth && this.captureConfig.captureDepth > 0) {
-      variables = this.limitDepth(variables, 0, this.captureConfig.captureDepth);
+    // --- v25: Local condition evaluation (before capture) ---
+    if (breakpoint.condition && breakpoint.condition_eval === 'sdk-evaluable') {
+      try {
+        const condResult = evaluateCondition(breakpoint.condition, variables);
+        if (!condResult) {
+          return; // Condition not met -- skip capture
+        }
+      } catch (err) {
+        if (err instanceof UnsupportedExpressionError) {
+          // Fall through to server CheckIn behavior (per EXPR-11)
+          if (this.captureConfig.debug) {
+            console.warn('TraceKit: expression fell back to server evaluation:', breakpoint.condition);
+          }
+        } else {
+          // Other evaluation error -- log and fall through to server
+          if (this.captureConfig.debug) {
+            console.error('TraceKit: condition evaluation error:', err);
+          }
+        }
+      }
+    }
+
+    // --- v25: Logpoint mode (capture only expression results, no variables/stack) ---
+    if (breakpoint.mode === 'logpoint') {
+      const expressionResults = evaluateExpressions(
+        breakpoint.capture_expressions || [],
+        variables
+      );
+      const logSnapshot: Snapshot = {
+        breakpoint_id: breakpoint.id,
+        service_name: this.serviceName,
+        file_path: file,
+        function_name: functionName,
+        label,
+        line_number: line,
+        variables: {},
+        stack_trace: '',
+        expression_results: expressionResults,
+        captured_at: new Date(),
+      };
+      await this.captureSnapshot(logSnapshot);
+      return;
+    }
+
+    // --- Capture depth: per-breakpoint max_depth overrides SDK-level captureDepth ---
+    const effectiveDepth = (breakpoint.max_depth && breakpoint.max_depth > 0)
+      ? breakpoint.max_depth
+      : this.captureConfig.captureDepth;
+
+    if (effectiveDepth && effectiveDepth > 0) {
+      variables = this.limitDepth(variables, 0, effectiveDepth);
     }
 
     // Extract request context (from AsyncLocalStorage or global)
@@ -278,17 +336,45 @@ export class SnapshotClient {
     // Safe serialize variables to check payload size
     const serializedVars = this.safeSerialize(securityScan.variables);
 
-    // Apply opt-in payload size limit
+    // --- Payload limit: per-breakpoint max_payload_bytes overrides SDK-level maxPayload ---
+    const effectiveMaxPayload = (breakpoint.max_payload_bytes && breakpoint.max_payload_bytes > 0)
+      ? breakpoint.max_payload_bytes
+      : this.captureConfig.maxPayload;
+
     let finalVariables = securityScan.variables;
-    if (this.captureConfig.maxPayload && this.captureConfig.maxPayload > 0) {
+    if (effectiveMaxPayload && effectiveMaxPayload > 0) {
       const payloadSize = new TextEncoder().encode(serializedVars).length;
-      if (payloadSize > this.captureConfig.maxPayload) {
+      if (payloadSize > effectiveMaxPayload) {
         finalVariables = {
           _truncated: true,
           _payload_size: payloadSize,
-          _max_payload: this.captureConfig.maxPayload,
+          _max_payload: effectiveMaxPayload,
         };
       }
+    }
+
+    // --- v25: Dynamic stack trace with per-breakpoint stack_depth ---
+    let capturedStack = stack;
+    if (breakpoint.stack_depth != null && breakpoint.stack_depth > 0) {
+      const stackLines = stack.split('\n');
+      // Keep the Error line (index 0) plus the requested number of frames
+      const limitedLines = stackLines.slice(0, breakpoint.stack_depth + 1);
+      if (limitedLines.length < stackLines.length) {
+        limitedLines.push(`    ... ${stackLines.length - limitedLines.length} more frames truncated`);
+      }
+      capturedStack = limitedLines.join('\n');
+    }
+    // Cap stack size at 32KB to match Go SDK behavior
+    const MAX_STACK_BYTES = 32 * 1024;
+    if (new TextEncoder().encode(capturedStack).length > MAX_STACK_BYTES) {
+      const encoder = new TextEncoder();
+      // Binary search is overkill; just truncate lines until under limit
+      const lines = capturedStack.split('\n');
+      while (lines.length > 2 && encoder.encode(lines.join('\n')).length > MAX_STACK_BYTES) {
+        lines.splice(lines.length - 1, 1);
+      }
+      lines.push('    ... stack trace truncated (32KB limit)');
+      capturedStack = lines.join('\n');
     }
 
     // Extract trace context from OpenTelemetry
@@ -313,7 +399,7 @@ export class SnapshotClient {
       line_number: line,
       variables: finalVariables,
       security_flags: securityScan.flags,
-      stack_trace: stack,
+      stack_trace: capturedStack,
       trace_id: traceId,
       span_id: spanId,
       request_context: requestContext,
